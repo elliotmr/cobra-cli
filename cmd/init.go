@@ -14,7 +14,9 @@
 package cmd
 
 import (
+	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -26,28 +28,26 @@ import (
 	"github.com/spf13/viper"
 )
 
-var (
-	initCmd = &cobra.Command{
-		Use:     "init [path]",
-		Aliases: []string{"initialize", "initialise", "create"},
-		Short:   "Initialize a Cobra Application",
-		Long: `Initialize (cobra init) will create a new application, with a license
+var initCmd = &cobra.Command{
+	Use:     "init [path]",
+	Aliases: []string{"initialize", "initialise", "create"},
+	Short:   "Initialize a Cobra Application",
+	Long: `Initialize (cobra init) will create a new application, with a license
 and the appropriate structure for a Cobra-based CLI application.
 
 Cobra init must be run inside of a go module (please run "go mod init <MODNAME>" first)
 `,
 
-		Run: func(_ *cobra.Command, args []string) {
-			projectPath, err := initializeProject(args)
-			cobra.CheckErr(err)
-			cobra.CheckErr(goGet("github.com/spf13/cobra"))
-			if viper.GetBool("useViper") {
-				cobra.CheckErr(goGet("github.com/spf13/viper"))
-			}
-			fmt.Printf("Your Cobra application is ready at\n%s\n", projectPath)
-		},
-	}
-)
+	Run: func(_ *cobra.Command, args []string) {
+		projectPath, err := initializeProject(args)
+		cobra.CheckErr(err)
+		cobra.CheckErr(goGet("github.com/spf13/cobra"))
+		if viper.GetBool("useViper") {
+			cobra.CheckErr(goGet("github.com/spf13/viper"))
+		}
+		fmt.Printf("Your Cobra application is ready at\n%s\n", projectPath)
+	},
+}
 
 func initializeProject(args []string) (string, error) {
 	wd, err := os.Getwd()
@@ -89,20 +89,41 @@ func fileToURL(in string) string {
 	return path.Join(i...)
 }
 
+func isSubDir(mod, cur string) bool {
+	rel, err := filepath.Rel(mod, cur)
+	cobra.CheckErr(err)
+	return strings.HasPrefix(rel, "..")
+}
+
 func parseModInfo() (Mod, CurDir) {
 	var mod Mod
 	var dir CurDir
 
+	e := modInfoJSON("-e")
+	cobra.CheckErr(json.Unmarshal(e, &dir))
+
 	m := modInfoJSON("-m")
-	cobra.CheckErr(json.Unmarshal(m, &mod))
+	err := json.Unmarshal(m, &mod)
+	var stErr *json.SyntaxError
+	tryNext := false
+	startOffset := int64(0)
+	for errors.As(err, &stErr) || tryNext {
+		err = json.Unmarshal(bytes.Trim(m[startOffset:startOffset+stErr.Offset-1], "\x00"), &mod)
+		cobra.CheckErr(err)
+		if isSubDir(mod.Dir, dir.Dir) {
+			tryNext = true
+			startOffset = startOffset + stErr.Offset - 1
+			err = json.Unmarshal(m[startOffset:], &mod)
+		} else {
+			tryNext = false
+		}
+	}
+	cobra.CheckErr(err)
 
 	// Unsure why, but if no module is present Path is set to this string.
 	if mod.Path == "command-line-arguments" {
 		cobra.CheckErr("Please run `go mod init <MODNAME>` before `cobra-cli init`")
 	}
-
-	e := modInfoJSON("-e")
-	cobra.CheckErr(json.Unmarshal(e, &dir))
 
 	return mod, dir
 }
